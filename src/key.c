@@ -1,22 +1,3 @@
-// feistel_file_encrypt_portable.c
-
-//  قابل بیلد/ران روی Linux و Windows (MSVC/MinGW)
-//
-// Build (Linux):
-//   gcc -O2 -Wall -Wextra -std=c11 feistel.c -o feistel_enc
-//   (روی بعضی لینوکس‌های قدیمی ممکنه نیاز بشه: ... -lrt)
-//
-// Build (Windows - MSVC, Developer Command Prompt):
-//   cl /O2 /W4 feistel.c
-//
-// Build (Windows - MinGW-w64):
-//   gcc -O2 -Wall -Wextra -std=c11 feistel_file_encrypt_portable.c -o feistel_enc.exe
-//
-// Run:
-//   ./feistel_enc input.bin output.enc
-//   (ویندوز: feistel.exe input.bin output.enc)
-
-
 
 
 #include <stdio.h>
@@ -25,57 +6,18 @@
 #include <stdlib.h>
 
 
-#ifdef _WIN32
-#include <windows.h>   // QueryPerformanceCounter
-#else
-#include <time.h>      // clock_gettime / timespec_get
-#endif
-
 // ============================
 //   CONFIG
 // ============================
 
-#define BLOCK_SIZE 16             // 64-bit block
-#define HALF_SIZE  (BLOCK_SIZE/2)  // 32 bytes
-#define HALF_HALF_SIZE  (HALF_SIZE/2)  // 16 bytes
-#define ROUNDS     35
-#define KEYLEN     64
-// exactly 64 characters
+#define BLOCK_SIZE 32            // 256-bit block
+#define HALF_SIZE  (BLOCK_SIZE/2)  // 128 bit
+#define HALF_HALF_SIZE  (HALF_SIZE/2)  // 64 bit
+//#define ROUNDS     40
+#define KEYLEN 32   // 256-bit = 32 bytes
+#define KEY_COUNT      26
 
-// ============================
-//   TIME (Portable)
-// ============================
-
-static double now_seconds(void) {
-#ifdef _WIN32
-    static LARGE_INTEGER freq;
-    LARGE_INTEGER counter;
-
-    if (freq.QuadPart == 0) {
-        QueryPerformanceFrequency(&freq);
-    }
-    QueryPerformanceCounter(&counter);
-
-    return (double)counter.QuadPart / (double)freq.QuadPart;
-#else
-#if defined(CLOCK_MONOTONIC)
-    struct timespec ts;
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
-        return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
-    }
-#endif
-
-#if defined(TIME_UTC)
-    struct timespec ts2;
-    if (timespec_get(&ts2, TIME_UTC) != 0) {
-        return (double)ts2.tv_sec + (double)ts2.tv_nsec / 1e9;
-    }
-#endif
-
-    return 0.0;
-#endif
-}
-
+uint8_t KEY_OUT[KEY_COUNT][HALF_SIZE];
 // ============================
 //   /2 - *2
 // ============================
@@ -109,7 +51,7 @@ static int join_generic(uint8_t *out, size_t n,
 
 
 // ============================
-//   XOR
+//   Tools
 // ============================
 
 
@@ -119,6 +61,163 @@ static void xor_generic(const uint8_t *a, const uint8_t *b, uint8_t *out, size_t
         out[i] = (uint8_t)(a[i] ^ b[i]);
     }
 }
+
+static void rotl_bytes_generic(const uint8_t *in, uint8_t *out, size_t n, unsigned shift_bits)
+{
+    if (n == 0) return;
+
+    unsigned total_bits = (unsigned)(n * 8);
+    shift_bits %= total_bits;
+    if (shift_bits == 0) {
+        for (size_t i = 0; i < n; i++) out[i] = in[i];
+        return;
+    }
+
+    unsigned byte_shift = shift_bits / 8;
+    unsigned bit_shift  = shift_bits % 8;
+
+    for (size_t i = 0; i < n; i++) {
+        size_t src1 = (i + byte_shift) % n;
+        size_t src2 = (i + byte_shift + 1) % n;
+
+        uint8_t a = in[src1];
+        uint8_t b = in[src2];
+
+        if (bit_shift == 0) {
+            out[i] = a;
+        } else {
+            out[i] = (uint8_t)((a << bit_shift) | (b >> (8 - bit_shift)));
+        }
+    }
+}
+
+static void rotr_bytes_generic(const uint8_t *in, uint8_t *out, size_t n, unsigned shift_bits)
+{
+    if (n == 0) return;
+
+    unsigned total_bits = (unsigned)(n * 8);
+    shift_bits %= total_bits;
+    if (shift_bits == 0) {
+        for (size_t i = 0; i < n; i++) out[i] = in[i];
+        return;
+    }
+
+    // right rotate by k == left rotate by (total_bits - k)
+    rotl_bytes_generic(in, out, n, (unsigned)(total_bits - shift_bits));
+}
+
+
+
+void print_key_out(uint8_t KEY_OUT[KEY_COUNT][HALF_SIZE]) {
+    for (int i = 0; i < KEY_COUNT; i++) {
+        printf("KEY_OUT[%d]: ", i);
+        for (int j = 0; j < HALF_SIZE; j++) {
+            printf("%02X ", KEY_OUT[i][j]);
+        }
+        printf("\n");
+    }
+}
+
+
+
+
+//base64 ----> hex
+static int b64_index(unsigned char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return 26 + (c - 'a');
+    if (c >= '0' && c <= '9') return 52 + (c - '0');
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    if (c == '=') return -2;     // padding
+    if (c == ' ' || c == '\n' || c == '\r' || c == '\t') return -3; // whitespace
+    return -1; // invalid
+}
+
+// returns 0 on success, nonzero on error
+// out_len is set to number of decoded bytes
+static int base64_decode(const char *in, uint8_t *out, size_t out_cap, size_t *out_len) {
+    int vals[4];
+    int vcount = 0;
+    size_t olen = 0;
+
+    for (size_t i = 0; in[i] != '\0'; i++) {
+        int v = b64_index((unsigned char)in[i]);
+        if (v == -3) continue;           // skip whitespace
+        if (v == -1) return 1;           // invalid char
+
+        vals[vcount++] = v;
+
+        if (vcount == 4) {
+            // Handle padding cases
+            if (vals[0] < 0 || vals[1] < 0) return 1;
+
+            uint32_t triple = 0;
+            triple |= (uint32_t)(vals[0] & 0x3F) << 18;
+            triple |= (uint32_t)(vals[1] & 0x3F) << 12;
+
+            if (vals[2] >= 0) triple |= (uint32_t)(vals[2] & 0x3F) << 6;
+            if (vals[3] >= 0) triple |= (uint32_t)(vals[3] & 0x3F);
+
+            // output bytes based on padding
+            if (vals[2] == -2 && vals[3] != -2) return 1; // invalid padding form
+
+            if (vals[2] == -2 && vals[3] == -2) {
+                // xx== -> 1 byte
+                if (olen + 1 > out_cap) return 2;
+                out[olen++] = (uint8_t)((triple >> 16) & 0xFF);
+            } else if (vals[3] == -2) {
+                // xxx= -> 2 bytes
+                if (olen + 2 > out_cap) return 2;
+                out[olen++] = (uint8_t)((triple >> 16) & 0xFF);
+                out[olen++] = (uint8_t)((triple >> 8) & 0xFF);
+            } else {
+                // xxxx -> 3 bytes
+                if (olen + 3 > out_cap) return 2;
+                out[olen++] = (uint8_t)((triple >> 16) & 0xFF);
+                out[olen++] = (uint8_t)((triple >> 8) & 0xFF);
+                out[olen++] = (uint8_t)(triple & 0xFF);
+            }
+
+            vcount = 0;
+        }
+    }
+
+    if (vcount != 0) return 1; // incomplete quartet
+    *out_len = olen;
+    return 0;
+}
+
+// Reads a base64 key from stdin, decodes, and requires exactly 32 bytes (256-bit)
+static int read_key_256bit_base64(uint8_t master_key[KEYLEN]) {
+    char key_in[4096];
+
+    printf("Enter a 256-bit key in Base64 (should decode to exactly 32 bytes):\n");
+    if (!fgets(key_in, sizeof(key_in), stdin)) {
+        fprintf(stderr, "Failed to read key.\n");
+        return 1;
+    }
+
+    size_t klen = strcspn(key_in, "\r\n");
+    key_in[klen] = '\0';
+
+    size_t out_len = 0;
+    int rc = base64_decode(key_in, master_key, KEYLEN, &out_len);
+    if (rc != 0) {
+        fprintf(stderr, "Error: invalid Base64 key.\n");
+        return 1;
+    }
+    if (out_len != KEYLEN) {
+        fprintf(stderr, "Error: Base64 decoded length is %zu bytes, must be exactly %d bytes (256-bit).\n",
+                out_len, KEYLEN);
+        return 1;
+    }
+
+    return 0;
+}
+
+
+
+
 
 
 
@@ -151,7 +250,7 @@ static void feistel_round(const uint8_t R[HALF_SIZE],
         keyL[i] = keymerg_onebit(newL[i], kL);
     }
 
-xor_generic(keyL, newR , newR, HALF_HALF_SIZE);
+    xor_generic(keyL, newR , newR, HALF_HALF_SIZE);
 
     for (int i = 0; i < HALF_HALF_SIZE; i++) {
         uint8_t oldR = newR[i];
@@ -196,47 +295,71 @@ static void feistel_round_inv(const uint8_t f_out[HALF_SIZE],
     (void)join_generic(R, HALF_SIZE, oldL, oldR);
 }
 
+
+
+
 // ============================
-//  encrypt_block
+//
 // ============================
 
 
 
-static void encrypt_block(uint8_t block[BLOCK_SIZE], const uint8_t master_key[KEYLEN]) {
+static void encrypt_block(const uint8_t master_key[KEYLEN]) {
     uint8_t L[HALF_SIZE], R[HALF_SIZE];
-    if (split_generic(block, BLOCK_SIZE, L, R) != 0) {
+
+    if (split_generic(master_key, BLOCK_SIZE, L, R) != 0) {
         return;
     }
 
+     uint8_t LC[HALF_SIZE], RC[HALF_SIZE];
+      uint8_t C1[HALF_SIZE], C2[HALF_SIZE];
 
-    for (int round = 0; round < ROUNDS; round++) {
+     xor_generic(L,C1, LC, HALF_SIZE);
+      xor_generic(R,C2,RC, HALF_SIZE);
+
+
+    for (int round = 0; round <= 15; round++) {
 
         uint8_t feistelout_R[HALF_SIZE];
         uint8_t feistelout_L[HALF_SIZE];
-         uint8_t feistelout_M[HALF_SIZE];
+        uint8_t feistelout_M[HALF_SIZE];
         uint8_t xorout_one[HALF_SIZE];
         uint8_t xorout_two[HALF_SIZE];
+        uint8_t feistelout_LSH[HALF_SIZE];
 
+        feistel_round(RC, master_key, round, feistelout_R);
+        feistel_round(LC, master_key, round, feistelout_L);
 
-        feistel_round(R, master_key, round, feistelout_R);
-        feistel_round(L, master_key, round, feistelout_L);
+        rotl_bytes_generic(feistelout_L, feistelout_LSH, 8, 43);
+        xor_generic(feistelout_LSH,feistelout_R, xorout_one, HALF_SIZE);
 
+        feistel_round(xorout_one, master_key, round, feistelout_M);
 
-       xor_generic(feistelout_L,feistelout_R, xorout_one, HALF_SIZE);
-
-      feistel_round(xorout_one, master_key, round, feistelout_M);
-
-       xor_generic(feistelout_L,feistelout_M, xorout_two, HALF_SIZE);
+        xor_generic(feistelout_L,feistelout_M, xorout_two, HALF_SIZE);
 
         for (int i = 0; i < HALF_SIZE; i++) {
             uint8_t oldR = xorout_one[i];
-              R[i] = xorout_two[i];
+            R[i] = xorout_two[i];
             L[i] = oldR;
 
         }
+        for (round = 16; round <= 40; round++) {
+                 uint8_t R1[HALF_HALF_SIZE], R2[HALF_HALF_SIZE];
+            if (round == 16) {
+                split_generic(R, HALF_SIZE, R1, R2);
+                memcpy(KEY_OUT[round - 16], R1, HALF_SIZE);
+                memcpy(KEY_OUT[round- 15], R2, HALF_SIZE);
+            } else if ((round % 2) == 0) {
+                split_generic(R, HALF_SIZE, R1, R2);
+                memcpy(KEY_OUT[round - 15], R, HALF_SIZE);
+                memcpy(KEY_OUT[round - 14], L, HALF_SIZE);
+            }
+        }
+
+
     }
 
-   (void)join_generic(block, BLOCK_SIZE, L, R);
+
 }
 
 
@@ -244,47 +367,42 @@ static void encrypt_block(uint8_t block[BLOCK_SIZE], const uint8_t master_key[KE
 
 
 
-
-
-
-
-
 // ============================
-//   MAIN (menu: 1=enc, 2=dec)
+//   MAIN
 // ============================
 
-int main(int argc, char *argv[]) {
+int main(int argc, char *argv[])
+{
+    // 1) check args
+    if (argc != 1) {
+        fprintf(stderr, "Usage: %s <key-base64> \n", argv[0]);
+        return 1;
+    }
 
-    // read key-64
-    char key_in[KEYLEN + 4];
+
+    // 4) read key
+    char key_in[KEYLEN + 4];      // +4 برای CRLF و null
     uint8_t master_key[KEYLEN];
 
-    printf("Enter a 64-character key (exactly 64 chars):\n");
+    printf("Enter a %d-character key (exactly %d chars):\n", KEYLEN, KEYLEN);
+
     if (!fgets(key_in, sizeof(key_in), stdin)) {
         fprintf(stderr, "Failed to read key.\n");
         return 1;
     }
 
-    // length of key and delete enter
+    // remove \r\n
     size_t klen = strcspn(key_in, "\r\n");
     key_in[klen] = '\0';
 
-    if (klen != KEYLEN) {
+    // check length
+    if (klen != (size_t)KEYLEN) {
         fprintf(stderr, "Error: key length is %zu, but must be exactly %d characters.\n", klen, KEYLEN);
         return 1;
     }
-
-    // key = master key
+    encrypt_block(master_key);
     memcpy(master_key, key_in, KEYLEN);
 
-    // encrypt/decrypt and timing
 
-
-
-
-
-
-
-    return 0;
-}
+    print_key_out(KEY_OUT);
 

@@ -35,9 +35,9 @@
 //   CONFIG
 // ============================
 
-#define BLOCK_SIZE 64             // 64-bit block
-#define HALF_SIZE  (BLOCK_SIZE/2)  // 32 bytes
-#define HALF_HALF_SIZE  (HALF_SIZE/2)  // 16 bytes
+#define BLOCK_SIZE 16             // 128-bit block
+#define HALF_SIZE  (BLOCK_SIZE/2)  // 8 bit
+#define HALF_HALF_SIZE  (HALF_SIZE/2)  // 4 bit
 #define ROUNDS     12
 #define KEYLEN 32   // 256-bit = 32 bytes
 
