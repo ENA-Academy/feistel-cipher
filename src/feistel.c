@@ -96,7 +96,7 @@ static double now_seconds(void) {
 // ============================
 
 
-static void feistel_round(const uint8_t in[HALF_SIZE],
+static void F(const uint8_t in[HALF_SIZE],
                           uint8_t f_out[HALF_SIZE])
 {
     uint8_t buffer1[HALF_HALF_SIZE];
@@ -104,11 +104,7 @@ static void feistel_round(const uint8_t in[HALF_SIZE],
     uint8_t *newL = buffer1;
     uint8_t *newR = buffer2;
 
-
-    if (split_generic(in, HALF_SIZE, newL, newR) != 0) {
-        memset(f_out, 0, HALF_SIZE);
-        return;
-    }
+    split_generic(in, HALF_SIZE, newL, newR);
 
 
 
@@ -120,10 +116,6 @@ static void feistel_round(const uint8_t in[HALF_SIZE],
 
 
     sds32_round(newL);
-
-
-
-
     xor_generic(newL, newR , newR, HALF_HALF_SIZE);
 
   sds32_round(newR);
@@ -159,19 +151,15 @@ static void feistel_round(const uint8_t in[HALF_SIZE],
 
 static void encrypt_block(uint8_t block[BLOCK_SIZE], const uint8_t key[KEY_COUNT][KEY_HALF_SIZE]) {
     uint8_t L[HALF_SIZE], R[HALF_SIZE];
-    if (split_generic(block, BLOCK_SIZE, L, R) != 0) {
-        return;
-    }
+
+   split_generic(block, BLOCK_SIZE, L, R);
 
 
     for (int round = 0; round < ROUNDS; round++) {
 
-        uint8_t feistelout_R[HALF_SIZE];
-        uint8_t feistelout_L[HALF_SIZE];
-         uint8_t feistelout_M[HALF_SIZE];
-        uint8_t xorout_one[HALF_SIZE];
-        uint8_t xorout_two[HALF_SIZE];
-         uint8_t feistelout_LSH[HALF_SIZE];
+
+         uint8_t RF[HALF_SIZE];
+         uint8_t LSH[HALF_SIZE];
 
 
          xor_generic(key[round*2],L, L, HALF_SIZE);
@@ -180,19 +168,19 @@ static void encrypt_block(uint8_t block[BLOCK_SIZE], const uint8_t key[KEY_COUNT
 
 
 
-        feistel_round(R, feistelout_R);
-        feistel_round(L,feistelout_L);
+        F(R, R);
+        F(L,L);
 
-        rotl_bytes_generic(feistelout_L, feistelout_LSH, 8, 43);
-       xor_generic(feistelout_LSH,feistelout_R, xorout_one, HALF_SIZE);
+        rotl_bytes_generic(L, LSH, 8, 43);
+       xor_generic(LSH,R,R, HALF_SIZE);
 
-      feistel_round(xorout_one, feistelout_M);
+      F(R, RF);
 
-       xor_generic(feistelout_L,feistelout_M, xorout_two, HALF_SIZE);
+       xor_generic(L,RF, L, HALF_SIZE);
 
         for (int i = 0; i < HALF_SIZE; i++) {
-            uint8_t oldR = xorout_one[i];
-              R[i] = xorout_two[i];
+            uint8_t oldR = R[i];
+              R[i] = L[i];
             L[i] = oldR;
 
         }
@@ -245,13 +233,13 @@ static void decrypt_block(uint8_t block[BLOCK_SIZE],
         // xorout_two = feistelout_L XOR feistelout_M
         //
         // پس:
-        // feistelout_M = feistel_round(xorout_one)  (همان F)
+        // feistelout_M = F(xorout_one)  (همان F)
         // feistelout_L = xorout_two XOR feistelout_M
         // feistelout_LSH = rotl(feistelout_L)
         // feistelout_R = xorout_one XOR feistelout_LSH
 
         uint8_t feistelout_M[HALF_SIZE];
-        feistel_round(xorout_one, feistelout_M);
+        F(xorout_one, feistelout_M);
 
         uint8_t feistelout_L[HALF_SIZE];
         xor_generic(xorout_two, feistelout_M, feistelout_L, HALF_SIZE);
@@ -262,14 +250,14 @@ static void decrypt_block(uint8_t block[BLOCK_SIZE],
         uint8_t feistelout_R[HALF_SIZE];
         xor_generic(xorout_one, feistelout_LSH, feistelout_R, HALF_SIZE);
 
-        // --------- (C) برگشت از feistel_round های اول راند ----------
+        // --------- (C) برگشت از F های اول راند ----------
         // feistelout_R = F(R_k) => R_k = F^{-1}(feistelout_R)
         // feistelout_L = F(L_k) => L_k = F^{-1}(feistelout_L)
 
         uint8_t Rk[HALF_SIZE];
         uint8_t Lk[HALF_SIZE];
-        // feistel_round_inv(feistelout_R, Rk);
-        // feistel_round_inv(feistelout_L, Lk);
+        // F_inv(feistelout_R, Rk);
+        // F_inv(feistelout_L, Lk);
 
         // --------- (D) Undo key XOR در ابتدای راند ----------
         // در encrypt:

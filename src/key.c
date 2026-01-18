@@ -7,7 +7,7 @@
 
 //build - linux
 
-//       gcc -O2 -Wall -Wextra -std=c11 key.c SDS.c -o feistel_enc
+//       gcc -O2 -Wall -Wextra -std=c11 key.c SDS.c tools.c -o feistel_enc
 
 
 
@@ -53,75 +53,50 @@ static const uint8_t C2[KEY_HALF_SIZE] = {
 //   F
 // ============================
 
-static inline uint8_t keymerg_onebit(uint8_t r, uint8_t k) {
-    return (uint8_t)(r ^ k);
-}
 
-static void feistel_round(const uint8_t R[KEY_HALF_SIZE],
+
+static void G(const uint8_t B[KEY_HALF_SIZE],
                           const uint8_t master_key[KEYLEN],
-                          int round,
-                          uint8_t f_out[KEY_HALF_SIZE])
+                          uint8_t G_out[KEY_HALF_SIZE])
 {
-    uint8_t newL[KEY_HH_SIZE], newR[KEY_HH_SIZE],keyL[KEY_HH_SIZE];
+    uint8_t L[KEY_HH_SIZE], R[KEY_HH_SIZE],keyL[KEY_HH_SIZE];
+     uint8_t L1[KEY_HH_SIZE/2], R1[KEY_HH_SIZE/2];
+      uint8_t L2[KEY_HH_SIZE/2], R2[KEY_HH_SIZE/2];
 
-    if (split_generic(R, KEY_HALF_SIZE, newL, newR) != 0) {
-        memset(f_out, 0, KEY_HALF_SIZE);
-        return;
-    }
 
+  split_generic(B, KEY_HH_SIZE, L, R);
+
+
+  split_generic(L, (KEY_HH_SIZE/2), L1, R1);
+    sds32_round(L1);
+    sds32_round(R1);
+    join_generic(L, KEY_HALF_SIZE/2, L1, R1);
+
+
+
+    xor_generic(L, R , R, KEY_HH_SIZE);
+
+
+
+    split_generic(R, (KEY_HH_SIZE/2), L2, R2);
+    sds32_round(L2);
+    sds32_round(R2);
+    join_generic(R, KEY_HALF_SIZE/2, L2, R2);
+    xor_generic(L, R , L, KEY_HH_SIZE);
+
+
+   
 
     for (int i = 0; i < KEY_HH_SIZE; i++) {
-        uint8_t kL = (uint8_t)(
-            master_key[(round * KEY_HALF_SIZE + i) % KEYLEN] ^
-            (uint8_t)(round * 17 + i * 31)
-            );
-        keyL[i] = keymerg_onebit(newL[i], kL);
-    }
-
-    xor_generic(keyL, newR , newR, KEY_HH_SIZE);
-
-    for (int i = 0; i < KEY_HH_SIZE; i++) {
-        uint8_t oldR = newR[i];
-        newR[i] =newL[i];
-        newL[i] = oldR;
+        uint8_t oldR = R[i];
+        R[i] = L[i];
+        L[i] = oldR;
 
     }
 
-    (void)join_generic(f_out, KEY_HALF_SIZE, newL, newR);
+    (void)join_generic(G_out, KEY_HALF_SIZE, L, R);
 }
 
-
-
-static void feistel_round_inv(const uint8_t f_out[KEY_HALF_SIZE],
-                              const uint8_t master_key[KEYLEN],
-                              int round,
-                              uint8_t R[KEY_HALF_SIZE])
-{
-    uint8_t newL[KEY_HH_SIZE], newR[KEY_HH_SIZE];
-    uint8_t oldL[KEY_HH_SIZE], oldR[KEY_HH_SIZE];
-
-    // f_out = join(newL, newR)
-    if (split_generic(f_out, KEY_HALF_SIZE, newL, newR) != 0) {
-        memset(R, 0, KEY_HALF_SIZE);
-        return;
-    }
-
-    // در encrypt داخل feistel_round آخرش swap شد:
-    // newR == oldL
-    // پس:
-    memcpy(oldL, newR, KEY_HH_SIZE);
-
-    // newL = oldR ^ (oldL ^ k)  => oldR = newL ^ oldL ^ k
-    for (int i = 0; i < KEY_HH_SIZE; i++) {
-        uint8_t kL = (uint8_t)(
-            master_key[(round * KEY_HALF_SIZE + i) % KEYLEN] ^
-            (uint8_t)(round * 17 + i * 31)
-            );
-        oldR[i] = (uint8_t)(newL[i] ^ oldL[i] ^ kL);
-    }
-
-    (void)join_generic(R, KEY_HALF_SIZE, oldL, oldR);
-}
 
 
 
@@ -139,38 +114,25 @@ static void encrypt_block(const uint8_t master_key[KEYLEN]) {
         return;
     }
 
-    uint8_t LC[KEY_HALF_SIZE], RC[KEY_HALF_SIZE];
 
 
-    xor_generic(L,C1, LC, KEY_HALF_SIZE);
-    xor_generic(R,C2,RC, KEY_HALF_SIZE);
+    xor_generic(L,C1, L, KEY_HALF_SIZE);
+    xor_generic(R,C2,R, KEY_HALF_SIZE);
 
     for (int round = 0; round <40; round++) {
 
-        uint8_t feistelout_R[KEY_HALF_SIZE];
-        uint8_t feistelout_L[KEY_HALF_SIZE];
-        uint8_t feistelout_M[KEY_HALF_SIZE];
-        uint8_t xorout_one[KEY_HALF_SIZE];
-        uint8_t xorout_two[KEY_HALF_SIZE];
-        uint8_t feistelout_LSH[KEY_HALF_SIZE];
+      
+        uint8_t LSHOUT[KEY_HALF_SIZE];
 
-        feistel_round(RC,master_key,round ,feistelout_R);
-        feistel_round(LC,master_key,round ,feistelout_L);
+        G(R,master_key,R);
+        G(L,master_key,L);
 
-        rotl_bytes_generic(feistelout_L, feistelout_LSH, KEY_HALF_SIZE, 43);
-        xor_generic(feistelout_LSH,feistelout_R, xorout_one, KEY_HALF_SIZE);
+        rotl_bytes_generic(L, LSHOUT, KEY_HALF_SIZE, 43);
+        xor_generic(LSHOUT,R, R, KEY_HALF_SIZE);
 
-        feistel_round(xorout_one, master_key, round, feistelout_M);
+        G(R, master_key, R);
 
-        xor_generic(feistelout_L,feistelout_M, xorout_two, KEY_HALF_SIZE);
-
-        for (int i = 0; i < KEY_HALF_SIZE; i++) {
-            uint8_t oldR = xorout_one[i];
-            R[i] = xorout_two[i];
-            L[i] = oldR;
-
-        }
-
+        xor_generic(L,R, L, KEY_HALF_SIZE);
 
 
         uint8_t R1[KEY_HH_SIZE], R2[KEY_HH_SIZE];
@@ -193,6 +155,16 @@ static void encrypt_block(const uint8_t master_key[KEYLEN]) {
             memcpy(KEY_OUT[round - 14], R2, KEY_HH_SIZE);
         }
 
+            
+        for (int i = 0; i < KEY_HALF_SIZE; i++) {
+            uint8_t oldR = R[i];
+            R[i] = L[i];
+            L[i] = oldR;
+
+        }
+
+
+
 
 }
 }
@@ -213,7 +185,7 @@ if (!out_key_out) return 2;
 
 const char *base64_str = NULL;
 
-// ✅ فقط اگر 3 آرگومان بعد از نام برنامه داریم (key + in + out) از argv کلید بگیر
+
 if (argc == 4) {
         base64_str = argv[1];
 } else {
@@ -244,17 +216,19 @@ encrypt_block(master_key);  // KEY_OUT پر می‌شود
 memcpy(out_key_out, KEY_OUT, sizeof(KEY_OUT));
 return 0;
 }
+
+
 //---------------
 
-//int main(int argc, char *argv[])
-//{
-//uint8_t out[KEY_COUNT][KEY_HH_SIZE];
+// int main(int argc, char *argv[])
+// {
+// uint8_t out[KEY_COUNT][KEY_HH_SIZE];
 
-//int rc = key_main(argc, argv, out);
-//if (rc != 0) return rc;
+// int rc = key_main(argc, argv, out);
+// if (rc != 0) return rc;
 
-//// حالا به جای KEY_OUT از out استفاده کن
-//print_key_out(out);
+// // حالا به جای KEY_OUT از out استفاده کن
+// print_key_out_hex(out);
 
-//return 0;
-//}
+// return 0;
+// }

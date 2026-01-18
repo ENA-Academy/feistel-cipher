@@ -17,9 +17,8 @@
 #define KEYLEN 32   // 256-bit = 32 bytes
 #define KEY_COUNT      26
 
-extern KEY_OUT[KEY_COUNT][KEY_HH_SIZE];
-
-extern master_key[KEY_COUNT][KEY_HH_SIZE];
+extern uint8_t KEY_OUT[KEY_COUNT][KEY_HH_SIZE];
+extern uint8_t master_key[KEY_COUNT][KEY_HH_SIZE];
 
 
 // ============================
@@ -208,14 +207,14 @@ extern master_key[KEY_COUNT][KEY_HH_SIZE];
 
 
 
-
- void print_key_out_hex(const uint8_t key[KEY_COUNT][KEY_HALF_SIZE]) {
+void print_key_out_hex(const uint8_t key[KEY_COUNT][KEY_HH_SIZE])
+{
     for (int i = 0; i < KEY_COUNT; i++) {
         printf("K[%02d] = ", i);
-        for (int j = 0; j < KEY_HALF_SIZE; j++) {
+        for (int j = 0; j < KEY_HH_SIZE; j++) {  // ✅ 8 بایت
             printf("%02X", key[i][j]);
         }
-        putchar('\n');
+        printf("\n");
     }
 }
 
